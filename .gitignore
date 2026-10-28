@@ -1,0 +1,91 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+.pnp
+.pnp.js
+
+# Next.js Build Outputs & Cache
+.next/
+frontend/.next/
+out/
+frontend/out/
+build/
+frontend/build/
+dist/
+
+# Python & Virtual Environments
+__pycache__/
+backend/app/**/__pycache__/
+backend/**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Testing & Coverage
+coverage/
+frontend/coverage/
+.nyc_output/
+*.lcov
+
+# Environment & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+
+# Logs & Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.log
+
+# Large Traffic Videos & Generated Evidence (Exceeds GitHub limits)
+data/traffic_videos/
+backend/data/traffic_videos/
+data/evidence/
+backend/data/evidence/
+data/uploads/
+backend/data/uploads/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# Keep the lightweight demonstration sample video
+!data/samples/sample_traffic.mp4
+!backend/data/samples/sample_traffic.mp4
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo

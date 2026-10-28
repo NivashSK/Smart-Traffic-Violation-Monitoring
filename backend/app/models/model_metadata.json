@@ -1,0 +1,109 @@
+{
+    "range_model_name": "Gradient Boosting",
+    "range_model_mae": 40.39782977414471,
+    "range_comparison": {
+        "Random Forest": {
+            "mae": 41.763654166666676,
+            "rmse": 52.19087044622978,
+            "r2": 0.7604802047349773,
+            "inference_time_ms": 0.1083728339936998
+        },
+        "Gradient Boosting": {
+            "mae": 40.39782977414471,
+            "rmse": 50.225622325485745,
+            "r2": 0.7781788335297093,
+            "inference_time_ms": 0.0069505638546413845
+        },
+        "XGBoost": {
+            "mae": 43.06706065124936,
+            "rmse": 57.14190168984535,
+            "r2": 0.7128811467041505,
+            "inference_time_ms": 0.006952219539218479
+        }
+    },
+    "consumption_model_name": "Random Forest",
+    "consumption_model_mae": 31.233631944444443,
+    "consumption_comparison": {
+        "Random Forest": {
+            "mae": 31.233631944444443,
+            "rmse": 36.41659748668105,
+            "r2": -0.012670221673085846,
+            "inference_time_ms": 0.10503331820170085
+        },
+        "Gradient Boosting": {
+            "mae": 32.138441922323686,
+            "rmse": 38.03477859359204,
+            "r2": -0.10466626795770129,
+            "inference_time_ms": 0.0
+        },
+        "XGBoost": {
+            "mae": 33.05193053351508,
+            "rmse": 41.06097807541934,
+            "r2": -0.28744263687162697,
+            "inference_time_ms": 0.006943941116333008
+        }
+    },
+    "style_classifier_accuracy": 0.9652777777777778,
+    "feature_importances": [
+        [
+            "battery_soh",
+            0.112020132744963
+        ],
+        [
+            "temperature",
+            0.10710093113502879
+        ],
+        [
+            "battery_pct",
+            0.10569325183884776
+        ],
+        [
+            "payload",
+            0.0978643041827381
+        ],
+        [
+            "phys_kinetic_demand",
+            0.08017491253419076
+        ],
+        [
+            "phys_aero_kw",
+            0.08001659047464947
+        ],
+        [
+            "phys_roll_kw",
+            0.07608387674291996
+        ],
+        [
+            "acceleration",
+            0.06722498066443638
+        ],
+        [
+            "road_gradient",
+            0.06718164038555162
+        ],
+        [
+            "phys_grade_kw",
+            0.060730770411638886
+        ],
+        [
+            "phys_aux_kw",
+            0.04058623984336102
+        ],
+        [
+            "braking_frequency",
+            0.03559022052045495
+        ],
+        [
+            "avg_speed",
+            0.02681091788416318
+        ],
+        [
+            "road_type_Highway",
+            0.013279038336244317
+        ],
+        [
+            "road_type_Urban",
+            0.011675832831011883
+        ]
+    ]
+}
