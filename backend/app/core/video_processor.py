@@ -16,9 +16,24 @@ VIOLATIONS_DATABASE = []
 
 try:
     from ultralytics import YOLO
+    import torch
+    torch.set_num_threads(6)
     HAS_YOLO = True
 except ImportError:
     HAS_YOLO = False
+
+GLOBAL_YOLO_MODEL = None
+
+def get_yolo_model():
+    global GLOBAL_YOLO_MODEL
+    if GLOBAL_YOLO_MODEL is None and HAS_YOLO:
+        try:
+            import torch
+            torch.set_num_threads(6)
+            GLOBAL_YOLO_MODEL = YOLO("yolov8n.pt")
+        except Exception as e:
+            print(f"Failed to load YOLO model: {e}")
+    return GLOBAL_YOLO_MODEL
 
 try:
     import easyocr
@@ -181,6 +196,8 @@ class TrafficVideoProcessor:
         self.track_positions = {} # track_id -> list of (cx, cy)
         self.track_ground_positions = {} # track_id -> list of (gx, gy, frame_idx)
         self.track_speeds = {} # track_id -> list of calculated speeds for smoothing
+        self.track_velocities = {} # track_id -> (vx, vy)
+        self.track_latest_speeds = {} # track_id -> latest speed
         self.crossing_info = {} # track_id -> crossing details
         self.active_speeding_episodes = {}
         self.completed_speeding_episodes = []
@@ -267,13 +284,10 @@ class TrafficVideoProcessor:
         speed_limit = config.get("speed_limit", DEFAULT_SPEED_LIMIT)
         parking_limit = config.get("parking_limit", PARKING_TIME_THRESHOLD)
         
-        # Load YOLO if using real detection on custom video
+        # Load YOLO if using real detection on custom video (cached globally)
         yolo_model = None
         if not is_sample_video and HAS_YOLO:
-            try:
-                yolo_model = YOLO("yolov8n.pt")
-            except Exception as e:
-                print(f"Failed to load YOLO model: {e}")
+            yolo_model = get_yolo_model()
                 
         # Simple background subtractor for OpenCV motion tracking fallback
         back_sub = cv2.createBackgroundSubtractorMOG2() if (not is_sample_video and not yolo_model) else None
@@ -335,117 +349,152 @@ class TrafficVideoProcessor:
                 detections = self._get_sample_video_detections(frame_idx, stop_line_y)
                 self.active_tracks_count = len(detections)
                 
-            # MODE 2: Real YOLOv8 Object Detection & Tracking
+            # MODE 2: Real YOLOv8 Object Detection & Tracking with Temporal Stride & Horizon Tile Boosting
             elif yolo_model:
                 try:
-                    raw_detections = []
+                    # Run YOLO inference every 3rd frame (stride=3), and project active tracks on intermediate frames
+                    is_detection_frame = (frame_idx % 3 == 0) or (frame_idx == 1)
                     
-                    # Slices configuration for 1280x960 input frame
-                    # 4 overlapping tiles of size 720x540
-                    tiles_config = [
-                        {"box": (0, 0, 720, 540), "offset": (0, 0)},
-                        {"box": (560, 0, 1280, 540), "offset": (560, 0)},
-                        {"box": (0, 420, 720, 960), "offset": (0, 420)},
-                        {"box": (560, 420, 1280, 960), "offset": (560, 420)}
-                    ]
-                    
-                    # 1. Full frame inference (for larger/close objects)
-                    full_results = yolo_model(frame, verbose=False)
-                    if full_results and len(full_results) > 0 and full_results[0].boxes is not None:
-                        for box in full_results[0].boxes:
-                            x1, y1, x2, y2 = map(int, box.xyxy[0])
-                            conf = float(box.conf[0]) if box.conf is not None else 0.8
-                            cls_id = int(box.cls[0])
-                            class_name = yolo_model.names[cls_id]
-                            
-                            if class_name in ["car", "motorcycle", "bus", "truck", "person"]:
+                    if is_detection_frame:
+                        raw_detections = []
+                        
+                        # Upper horizon slices for far/small objects (y: 0-540)
+                        # Bottom slices removed as nearby vehicles are large and detected by full frame
+                        tiles_config = [
+                            {"box": (0, 0, 720, 540), "offset": (0, 0)},
+                            {"box": (560, 0, 1280, 540), "offset": (560, 0)}
+                        ]
+                        
+                        # 1. Full frame inference (scaled to 640x480 for fast multi-core CPU inference)
+                        f_small = cv2.resize(frame, (640, 480))
+                        scale_fx = width / 640.0
+                        scale_fy = height / 480.0
+                        full_results = yolo_model.predict(f_small, classes=[0, 1, 2, 3, 5, 7], verbose=False)
+                        if full_results and len(full_results) > 0 and full_results[0].boxes is not None:
+                            for box in full_results[0].boxes:
+                                bx1, by1, bx2, by2 = map(float, box.xyxy[0])
+                                conf = float(box.conf[0]) if box.conf is not None else 0.8
+                                cls_id = int(box.cls[0])
+                                class_name = yolo_model.names[cls_id]
+                                ox1 = int(bx1 * scale_fx)
+                                oy1 = int(by1 * scale_fy)
+                                ox2 = int(bx2 * scale_fx)
+                                oy2 = int(by2 * scale_fy)
                                 raw_detections.append({
-                                    "bbox": (x1, y1, x2, y2),
+                                    "bbox": (ox1, oy1, ox2, oy2),
                                     "confidence": conf,
                                     "type": class_name
                                 })
-                                
-                    # 2. Tiled inference on overlapping slices (for small/far objects)
-                    for tile in tiles_config:
-                        tx1, ty1, tx2, ty2 = tile["box"]
-                        slice_w = tx2 - tx1
-                        slice_h = ty2 - ty1
-                        slice_img = frame[ty1:ty2, tx1:tx2]
+                                    
+                        # 2. Tiled inference on upper horizon slices (run every 6th frame to capture distant vehicles)
+                        if (frame_idx % 6 == 0) or (frame_idx == 1):
+                            for tile in tiles_config:
+                                tx1, ty1, tx2, ty2 = tile["box"]
+                                slice_w = tx2 - tx1
+                                slice_h = ty2 - ty1
+                                slice_img = frame[ty1:ty2, tx1:tx2]
+                                slice_resized = cv2.resize(slice_img, (640, 480))
+                                slice_results = yolo_model.predict(slice_resized, classes=[0, 1, 2, 3, 5, 7], verbose=False)
+                                if slice_results and len(slice_results) > 0 and slice_results[0].boxes is not None:
+                                    for box in slice_results[0].boxes:
+                                        bx1, by1, bx2, by2 = map(float, box.xyxy[0])
+                                        conf = float(box.conf[0]) if box.conf is not None else 0.8
+                                        if conf < 0.25:
+                                            continue
+                                        cls_id = int(box.cls[0])
+                                        class_name = yolo_model.names[cls_id]
+                                        scale_x = slice_w / 640.0
+                                        scale_y = slice_h / 480.0
+                                        ox1 = int(bx1 * scale_x + tile["offset"][0])
+                                        oy1 = int(by1 * scale_y + tile["offset"][1])
+                                        ox2 = int(bx2 * scale_x + tile["offset"][0])
+                                        oy2 = int(by2 * scale_y + tile["offset"][1])
+                                        raw_detections.append({
+                                            "bbox": (ox1, oy1, ox2, oy2),
+                                            "confidence": conf,
+                                            "type": class_name
+                                        })
+                                        
+                        # 3. Merge and run Non-Maximum Suppression (NMS)
+                        merged_detections = non_max_suppression(raw_detections, iou_threshold=0.45)
                         
-                        # Resize slice to standard 640x640 YOLOv8 coco scale for hyper-inference
-                        slice_resized = cv2.resize(slice_img, (640, 640))
-                        
-                        slice_results = yolo_model(slice_resized, verbose=False)
-                        if slice_results and len(slice_results) > 0 and slice_results[0].boxes is not None:
-                            for box in slice_results[0].boxes:
-                                bx1, by1, bx2, by2 = map(float, box.xyxy[0])
-                                conf = float(box.conf[0]) if box.conf is not None else 0.8
-                                
-                                # Conserved confidence threshold on slices (0.25)
-                                if conf < 0.25:
-                                    continue
-                                    
-                                cls_id = int(box.cls[0])
-                                class_name = yolo_model.names[cls_id]
-                                
-                                if class_name in ["car", "motorcycle", "bus", "truck", "person"]:
-                                    # Remap coordinates from resized scale to original coordinate space
-                                    scale_x = slice_w / 640.0
-                                    scale_y = slice_h / 640.0
-                                    
-                                    ox1 = int(bx1 * scale_x + tile["offset"][0])
-                                    oy1 = int(by1 * scale_y + tile["offset"][1])
-                                    ox2 = int(bx2 * scale_x + tile["offset"][0])
-                                    oy2 = int(by2 * scale_y + tile["offset"][1])
-                                    
-                                    raw_detections.append({
-                                        "bbox": (ox1, oy1, ox2, oy2),
-                                        "confidence": conf,
-                                        "type": class_name
-                                    })
-                                    
-                    # 3. Merge and run Non-Maximum Suppression (NMS)
-                    merged_detections = non_max_suppression(raw_detections, iou_threshold=0.45)
-                    
-                    # 4. Format detections for tracker
-                    detections_formatted = []
-                    for det in merged_detections:
-                        ox1, oy1, ox2, oy2 = det["bbox"]
-                        cx, cy = (ox1 + ox2) // 2, (oy1 + oy2) // 2
-                        
-                        # Verify bottom center is inside the road polygon (if defined)
-                        inside_road = True
-                        if self.road_polygon:
-                            inside_road = cv2.pointPolygonTest(
-                                np.array(self.road_polygon, dtype=np.int32),
-                                (cx, oy2),
-                                False
-                            ) >= 0
+                        # 4. Format detections for tracker
+                        detections_formatted = []
+                        for det in merged_detections:
+                            ox1, oy1, ox2, oy2 = det["bbox"]
+                            cx, cy = (ox1 + ox2) // 2, (oy1 + oy2) // 2
                             
-                        if not inside_road:
-                            continue
+                            inside_road = True
+                            if self.road_polygon:
+                                inside_road = cv2.pointPolygonTest(
+                                    np.array(self.road_polygon, dtype=np.int32),
+                                    (cx, oy2),
+                                    False
+                                ) >= 0
+                                
+                            if not inside_road:
+                                continue
+                                
+                            type_map = {
+                                "car": "Car",
+                                "motorcycle": "Motorcycle",
+                                "bus": "Bus",
+                                "truck": "Truck",
+                                "person": "Rider"
+                            }
+                            detections_formatted.append({
+                                "id": 99,
+                                "type": type_map.get(det["type"], "Car"),
+                                "bbox": (ox1, oy1, ox2, oy2),
+                                "cx": cx, "cy": cy,
+                                "speed": 40.0,
+                                "helmet": "YES",
+                                "plate": "MH12AB1234",
+                                "confidence": det["confidence"]
+                            })
                             
-                        type_map = {
-                            "car": "Car",
-                            "motorcycle": "Motorcycle",
-                            "bus": "Bus",
-                            "truck": "Truck",
-                            "person": "Rider"
-                        }
-                        detections_formatted.append({
-                            "id": 99,
-                            "type": type_map.get(det["type"], "Car"),
-                            "bbox": (ox1, oy1, ox2, oy2),
-                            "cx": cx, "cy": cy,
-                            "speed": 40.0,
-                            "helmet": "YES",
-                            "plate": "MH12AB1234",
-                            "confidence": det["confidence"]
-                        })
+                        # 5. Update Custom IOU Tracker
+                        detections = self.tracker.update(detections_formatted)
+                        self.active_tracks_count = len(detections)
                         
-                    # 5. Update Custom IOU Tracker
-                    detections = self.tracker.update(detections_formatted)
-                    self.active_tracks_count = len(detections)
+                        # Compute velocities for active tracks
+                        for det in detections:
+                            t_id = det["id"]
+                            cx, cy = det["cx"], det["cy"]
+                            if t_id in self.track_positions and len(self.track_positions[t_id]) >= 1:
+                                prev_cx, prev_cy = self.track_positions[t_id][-1]
+                                vx = cx - prev_cx
+                                vy = (det["bbox"][3]) - prev_cy
+                                old_vx, old_vy = self.track_velocities.get(t_id, (vx, vy))
+                                self.track_velocities[t_id] = (int(old_vx * 0.4 + vx * 0.6), int(old_vy * 0.4 + vy * 0.6))
+                            else:
+                                self.track_velocities[t_id] = (0, 0)
+                    else:
+                        # Intermediate frame: Constant Velocity Forward Projection
+                        detections = []
+                        for t_id, track in list(self.tracker.tracks.items()):
+                            vx, vy = self.track_velocities.get(t_id, (0, 0))
+                            bx1, by1, bx2, by2 = track["bbox"]
+                            nbx1 = max(0, min(width - 1, bx1 + vx))
+                            nby1 = max(0, min(height - 1, by1 + vy))
+                            nbx2 = max(0, min(width - 1, bx2 + vx))
+                            nby2 = max(0, min(height - 1, by2 + vy))
+                            track["bbox"] = (nbx1, nby1, nbx2, nby2)
+                            track["cx"] = (nbx1 + nbx2) // 2
+                            track["cy"] = (nby1 + nby2) // 2
+                            
+                            det_proj = {
+                                "id": t_id,
+                                "type": track["type"],
+                                "bbox": (nbx1, nby1, nbx2, nby2),
+                                "cx": track["cx"], "cy": track["cy"],
+                                "speed": self.track_latest_speeds.get(t_id, 40.0),
+                                "helmet": track.get("helmet", "YES"),
+                                "plate": track.get("plate", "MH12AB1234"),
+                                "confidence": track.get("confidence", 0.85)
+                            }
+                            detections.append(det_proj)
+                        self.active_tracks_count = len(detections)
                     
                     # Update trajectory histories and calculate dynamic speed
                     for det in detections:
@@ -536,6 +585,8 @@ class TrafficVideoProcessor:
                                         speed_val = min(150.0, max(0.0, speed_val))
                                         
                         det["speed"] = speed_val
+                        if speed_val is not None:
+                            self.track_latest_speeds[t_id] = speed_val
                 except Exception as e:
                     print(f"YOLO Tiled Inference Track Error: {e}")
                     
@@ -848,9 +899,10 @@ class TrafficVideoProcessor:
             
             out.write(frame)
             
-            # Encode frame to JPEG for live streaming
+            # Encode frame to JPEG for live streaming with downsampling for low latency
             try:
-                _, jpeg_buf = cv2.imencode('.jpg', frame)
+                preview_frame = cv2.resize(frame, (800, 600)) if (width > 800 or height > 600) else frame
+                _, jpeg_buf = cv2.imencode('.jpg', preview_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                 self.latest_frame = jpeg_buf.tobytes()
             except Exception as e:
                 print(f"Error encoding frame: {e}")
